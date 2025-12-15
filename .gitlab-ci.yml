@@ -1,0 +1,93 @@
+stages:
+  - plan
+  - deploy
+
+# -----------------------------------------------------------------------------
+# Common job templates
+# -----------------------------------------------------------------------------
+.terraform_base: &base
+  image:
+    name: hashicorp/terraform:1.5
+    entrypoint: [""]
+  before_script:
+    - cd ${CI_PROJECT_DIR}
+    - terraform --version
+
+.terraform_plan: &plan
+  stage: plan
+  script:
+    - |
+      # Handle backend config file existence
+      if [ ! -f "$TF_BACKEND_CONFIG" ]; then
+        echo "$TF_BACKEND_CONFIG" > /tmp/tf-backend-config
+        export TF_BACKEND_CONFIG=/tmp/tf-backend-config
+      else
+        export TF_BACKEND_CONFIG=$TF_BACKEND_CONFIG
+      fi
+    - terraform init -no-color -reconfigure
+    - terraform validate
+    - terraform plan --refresh-only
+    - terraform plan -var-file=${TF_VAR_FILE} -input=false -refresh=true -out=${CI_COMMIT_BRANCH}.tfplan
+  artifacts:
+    paths:
+      - .terraform
+      - .terraform.lock.hcl
+      - '*.tfplan' # Capture the plan file dynamically (dev.tfplan or prod.tfplan)
+    expire_in: 1 week
+
+.terraform_apply: &apply
+  stage: deploy
+  when: manual
+  script:
+    - terraform apply -input=false -auto-approve ${CI_COMMIT_BRANCH}.tfplan
+
+# -----------------------------------------------------------------------------
+# Dev Environment (ecs_crcwc_tf branch)
+# -----------------------------------------------------------------------------
+.ecs_crcwc_tf:
+  <<: *base
+  variables:
+    TF_VAR_FILE: environments/dev.tfvars
+    TF_BACKEND_CONFIG: backend/dev.tf
+    AWS_DEFAULT_REGION: us-west-2
+  tags:
+    - sas-dev
+
+tf:plan:ecs_crcwc_tf:
+  extends: .ecs_crcwc_tf
+  <<: *plan
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "ecs_crcwc_tf"'
+
+tf:apply:ecs_crcwc_tf:
+  extends: .ecs_crcwc_tf
+  dependencies:
+     - tf:plan:ecs_crcwc_tf
+  <<: *apply
+  
+# -----------------------------------------------------------------------------
+# Prod Environment (prod branch)
+# -----------------------------------------------------------------------------
+.ecs_crcwc_tf_prod:
+  <<: *base
+  variables:
+    TF_VAR_FILE: environments/prod.tfvars    
+    TF_BACKEND_CONFIG: backend/prod.tf       
+    AWS_DEFAULT_REGION: us-west-2
+  tags:
+    - sas-prod                             
+
+tf:plan:ecs_crcwc_tf_prod:
+  extends: .ecs_crcwc_tf_prod
+  <<: *plan
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "ecs_crcwc_tf_prod"'
+
+tf:apply:ecs_crcwc_tf:prod:
+  extends: .ecs_crcwc_tf_prod
+  environment:
+    name: production
+    deployment_tier: production
+  dependencies:
+     - tf:plan:ecs_crcwc_tf_prod
+  <<: *apply
